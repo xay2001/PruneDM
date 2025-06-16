@@ -6,4 +6,4 @@ python ddpm_prune.py \
 --batch_size 128 \
 --pruner magnitude \
 --thr 0.05 \
---device cuda:0 \
+--device cuda:2 \
