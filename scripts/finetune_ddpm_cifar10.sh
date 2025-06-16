@@ -1,9 +1,9 @@
 python ddpm_train.py \
   --dataset="cifar10" \
-  --model_path="run/pruned/ddpm_cifar10_pruned" \
-  --pruned_model_ckpt="run/pruned/ddpm_cifar10_pruned/pruned/unet_pruned.pth" \
+  --model_path="run/pruned/magnitude/ddpm_cifar10_pruned" \
+  --pruned_model_ckpt="run/pruned/magnitude/ddpm_cifar10_pruned/pruned/unet_pruned.pth" \
   --resolution=32 \
-  --output_dir="run/finetuned/ddpm_cifar10_pruned_post_training" \
+  --output_dir="run/finetuned/magnitude/ddpm_cifar10_pruned_post_training" \
   --train_batch_size=128 \
   --num_iters=100000 \
   --gradient_accumulation_steps=1 \
