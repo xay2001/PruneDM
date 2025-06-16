@@ -1,7 +1,7 @@
-torch==1.7.1
+torch==2.1.0
 torchvision==0.8.2
 torchaudio==0.7.2
-accelerate==0.11.0
+accelerate==0.24.1
 scipy==1.7.3
 tqdm==4.64.1
 numpy==1.21.6
