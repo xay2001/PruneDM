@@ -7,4 +7,4 @@ tqdm==4.64.1
 numpy==1.21.6
 huggingface_hub==0.16.4
 diffusers==0.18.0
-torch-pruning
+torch-pruning==1.3.1
