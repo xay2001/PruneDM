@@ -1,9 +1,19 @@
+from .hooks import ActivationHooker
+from .pruners import prune_wanda_diff
+from .wanda_utils import (
+    compute_channel_importance, 
+    aggregate_activations, 
+    analyze_activation_distribution,
+    parse_time_step_range
+)
+
+# Import dataset functions to maintain compatibility with existing code
 import torch
-from glob import glob
-from PIL import Image
 import os
 from torchvision import transforms as T
 from torchvision.datasets import CIFAR10, CIFAR100
+from glob import glob
+from PIL import Image
 
 class UnlabeledImageFolder(torch.utils.data.Dataset):
     def __init__(self, root, transform=None, exts=["*.jpg", "*.png", "*.jpeg", "*.webp"]):
@@ -22,11 +32,6 @@ class UnlabeledImageFolder(torch.utils.data.Dataset):
         if self.transform is not None:
             img = self.transform(img)
         return img
-
-def set_dropout(model, p):
-    for m in model.modules():
-        if isinstance(m, torch.nn.Dropout):
-            m.p = p
 
 def get_dataset(name_or_path, transform=None):
     if name_or_path is None or name_or_path.lower()=='cifar10':
@@ -67,18 +72,9 @@ def get_dataset(name_or_path, transform=None):
         dataset = CIFAR10(root='./data', train=True, download=True, transform=transform)
     return dataset
 
-
 def get_calibration_dataset(name_or_path, num_samples=1024, transform=None):
     """
     获取用于校准的小规模数据集
-    
-    Args:
-        name_or_path: 数据集路径或名称
-        num_samples: 校准样本数量
-        transform: 数据变换
-        
-    Returns:
-        torch.utils.data.Dataset: 校准数据集
     """
     full_dataset = get_dataset(name_or_path, transform)
     
@@ -91,3 +87,14 @@ def get_calibration_dataset(name_or_path, num_samples=1024, transform=None):
     
     return calib_dataset
 
+__all__ = [
+    'ActivationHooker',
+    'prune_wanda_diff', 
+    'compute_channel_importance',
+    'aggregate_activations',
+    'analyze_activation_distribution',
+    'parse_time_step_range',
+    'get_dataset',
+    'get_calibration_dataset',
+    'UnlabeledImageFolder'
+] 
