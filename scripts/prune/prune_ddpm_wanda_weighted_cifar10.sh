@@ -4,7 +4,7 @@
 # 使用方法: bash scripts/prune/prune_ddpm_wanda_weighted_cifar10.sh 0.3
 # 参数 $1: 剪枝比率 (例如 0.3 表示30%剪枝)
 
-python ddpm_prune.py \
+CUDA_VISIBLE_DEVICES=1 python ddpm_prune.py \
 --dataset cifar10 \
 --model_path pretrained/ddpm_ema_cifar10 \
 --save_path run/pruned/wanda-diff-weighted/ddpm_cifar10_pruned \

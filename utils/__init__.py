@@ -33,6 +33,12 @@ class UnlabeledImageFolder(torch.utils.data.Dataset):
             img = self.transform(img)
         return img
 
+def set_dropout(model, p):
+    """设置模型中所有Dropout层的dropout概率"""
+    for m in model.modules():
+        if isinstance(m, torch.nn.Dropout):
+            m.p = p
+
 def get_dataset(name_or_path, transform=None):
     if name_or_path is None or name_or_path.lower()=='cifar10':
         if transform is None:
@@ -96,5 +102,6 @@ __all__ = [
     'parse_time_step_range',
     'get_dataset',
     'get_calibration_dataset',
-    'UnlabeledImageFolder'
+    'UnlabeledImageFolder',
+    'set_dropout'
 ] 

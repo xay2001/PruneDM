@@ -1,9 +1,9 @@
-CUDA_VISIBLE_DEVICES=1 python ddpm_train.py \
+CUDA_VISIBLE_DEVICES=2 python ddpm_train.py \
   --dataset="cifar10" \
-  --model_path="run/pruned/wanda-diff/ddpm_cifar10_pruned" \
-  --pruned_model_ckpt="run/pruned/wanda-diff/ddpm_cifar10_pruned/pruned/unet_pruned.pth" \
+  --model_path="run/pruned/wanda-diff-weighted/ddpm_cifar10_pruned" \
+  --pruned_model_ckpt="run/pruned/wanda-diff-weighted/ddpm_cifar10_pruned/pruned/unet_pruned.pth" \
   --resolution=32 \
-  --output_dir="run/finetuned/wanda-diff/ddpm_cifar10_pruned_post_training" \
+  --output_dir="run/finetuned/wanda-diff-weighted/ddpm_cifar10_pruned_post_training" \
   --train_batch_size=128 \
   --num_iters=100000 \
   --gradient_accumulation_steps=1 \
