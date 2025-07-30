@@ -317,3 +317,175 @@ def print_pruning_summary(pruning_plan: Dict[nn.Module, List[int]],
     print("-" * 60)
     print(f"总计: {total_original} -> {total_original - total_pruned} 通道 (剪枝 {overall_ratio:.1%})")
     print("="*60) 
+
+
+class WandaImportance:
+    """
+    Wanda重要性评估器，兼容torch-pruning框架
+    结合权重幅度和激活分布来计算通道重要性
+    """
+    
+    def __init__(self, aggregated_activations, p=2, normalizer='mean'):
+        """
+        Args:
+            aggregated_activations: 预计算的聚合激活数据 {layer: activation_norms}
+            p: 范数类型 (默认L2范数)
+            normalizer: 归一化方法
+        """
+        self.aggregated_activations = aggregated_activations
+        self.p = p
+        self.normalizer = normalizer
+    
+    def _normalize(self, importance, normalizer):
+        """归一化重要性分数"""
+        if normalizer is None:
+            return importance
+        elif normalizer == "sum":
+            return importance / importance.sum()
+        elif normalizer == "mean":
+            return importance / importance.mean()
+        elif normalizer == "max": 
+            return importance / importance.max()
+        elif normalizer == "gaussian":
+            return (importance - importance.mean()) / (importance.std() + 1e-8)
+        else:
+            return importance
+    
+    def __call__(self, group, ch_groups=1):
+        """
+        计算剪枝组的重要性分数
+        
+        Args:
+            group: torch-pruning的剪枝组 [(dependency, indices), ...]
+            ch_groups: 通道分组数 (GroupNorm约束)
+            
+        Returns:
+            torch.Tensor: 重要性分数
+        """
+        # 找到Conv2d层
+        conv_layer = None
+        conv_indices = None
+        
+        for dep, indices in group:
+            layer = dep.target.module
+            if isinstance(layer, torch.nn.Conv2d):
+                conv_layer = layer
+                conv_indices = indices
+                break
+        
+        if conv_layer is None or conv_layer not in self.aggregated_activations:
+            # 如果没有找到对应层或激活数据，使用权重幅度
+            return self._fallback_magnitude_importance(group, ch_groups)
+        
+        # 获取权重和激活
+        weight = conv_layer.weight.detach().cpu().float()  # (C_out, C_in, K, K)
+        activation_norms = self.aggregated_activations[conv_layer].float()  # (C_in,)
+        
+        # 检查维度匹配
+        if weight.shape[1] != activation_norms.shape[0]:
+            return self._fallback_magnitude_importance(group, ch_groups)
+        
+        # 计算Wanda重要性: 权重范数 * 激活范数
+        weight_norms = weight.abs().pow(self.p).sum(dim=[2, 3])  # (C_out, C_in)
+        
+        # 按输出通道计算重要性
+        channel_importance = []
+        for out_ch in conv_indices:
+            if out_ch < weight_norms.shape[0]:
+                # 该输出通道对所有输入通道的重要性
+                ch_weight_norms = weight_norms[out_ch]  # (C_in,)
+                # Wanda公式: |W| * |A|
+                wanda_score = (ch_weight_norms * activation_norms).sum()
+                channel_importance.append(wanda_score)
+            else:
+                channel_importance.append(0.0)
+        
+        importance = torch.tensor(channel_importance, dtype=torch.float32)
+        
+        # 处理通道分组约束
+        if ch_groups > 1:
+            group_size = len(importance) // ch_groups
+            importance = importance[:group_size * ch_groups]  # 确保能整除
+            importance = importance.view(ch_groups, group_size).mean(dim=0)
+            importance = importance.repeat(ch_groups)
+        
+        # 归一化
+        importance = self._normalize(importance, self.normalizer)
+        
+        return importance
+    
+    def _fallback_magnitude_importance(self, group, ch_groups=1):
+        """回退到权重幅度重要性"""
+        importance_scores = []
+        
+        for dep, indices in group:
+            layer = dep.target.module
+            if isinstance(layer, torch.nn.Conv2d):
+                weight = layer.weight.detach()
+                weight_norms = weight.abs().pow(self.p).sum(dim=[1, 2, 3])  # (C_out,)
+                for idx in indices:
+                    if idx < len(weight_norms):
+                        importance_scores.append(weight_norms[idx].item())
+                    else:
+                        importance_scores.append(0.0)
+                break
+        
+        if not importance_scores:
+            # 最后的回退方案：随机重要性
+            return torch.rand(len(group[0][1]))
+        
+        importance = torch.tensor(importance_scores, dtype=torch.float32)
+        
+        # 处理通道分组
+        if ch_groups > 1:
+            group_size = len(importance) // ch_groups
+            importance = importance[:group_size * ch_groups]
+            importance = importance.view(ch_groups, group_size).mean(dim=0)
+            importance = importance.repeat(ch_groups)
+        
+        return self._normalize(importance, self.normalizer) 
+
+
+def get_pruning_indices_with_groupnorm_constraint(
+    importance_scores: torch.Tensor, 
+    pruning_ratio: float, 
+    num_groups: int = 32
+) -> List[int]:
+    """
+    根据重要性得分获取需要剪枝的通道索引，确保剩余通道数满足GroupNorm约束
+    
+    Args:
+        importance_scores: 重要性得分张量
+        pruning_ratio: 目标剪枝比率 (0.0 - 1.0)
+        num_groups: GroupNorm的分组数（默认32）
+        
+    Returns:
+        List[int]: 需要剪枝的通道索引列表，确保剩余通道数能被num_groups整除
+    """
+    num_channels = len(importance_scores)
+    target_prune = int(num_channels * pruning_ratio)
+    
+    # 确保剩余通道数能被num_groups整除
+    remaining = num_channels - target_prune
+    if remaining % num_groups != 0:
+        # 调整到最近的满足约束的值（向下取整到最近的倍数）
+        remaining = (remaining // num_groups) * num_groups
+        # 确保至少保留一个分组
+        if remaining == 0:
+            remaining = num_groups
+        target_prune = num_channels - remaining
+    
+    # 边界检查
+    if target_prune <= 0:
+        return []
+    if target_prune >= num_channels:
+        target_prune = num_channels - num_groups  # 至少保留一个分组
+    
+    # 获取重要性最低的通道索引
+    _, indices = torch.topk(importance_scores, target_prune, largest=False)
+    
+    print(f"GroupNorm约束调整: {num_channels} -> {remaining} 通道 "
+          f"(原计划剪枝{int(num_channels * pruning_ratio)}，"
+          f"调整为剪枝{target_prune}，确保能被{num_groups}整除)")
+    
+    return indices.tolist() 

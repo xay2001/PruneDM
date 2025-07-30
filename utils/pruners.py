@@ -159,56 +159,15 @@ def prune_wanda_diff(pipeline,
             else:
                 print("  ⚠ 大幅值特征不明显，Wanda效果可能有限")
     
-    # 步骤3: 计算通道重要性
+    # 步骤3: 使用torch-pruning + Wanda重要性进行结构化剪枝
     if verbose:
-        print("\n步骤3: 计算通道重要性...")
+        print("\n步骤3: 初始化Wanda剪枝器...")
     
+    # 获取聚合激活数据
     aggregated_activations = hooker.get_aggregated_norms(strategy=activation_strategy)
-    channel_importances = {}
-    pruning_plan = {}
-    
-    conv_layers = []
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Conv2d):
-            conv_layers.append((name, module))
-    
-    for name, layer in tqdm(conv_layers, desc="计算重要性", disable=not verbose):
-        if layer not in aggregated_activations:
-            if verbose:
-                print(f"警告: 层 {name} 没有激活数据，跳过")
-            continue
-        
-        # 获取权重和激活范数
-        weight = layer.weight.detach().cpu().float()  # (C_out, C_in, K, K)
-        activation_norms = aggregated_activations[layer].float()  # (C_in,)
-        
-        # 确保维度匹配
-        if weight.shape[1] != activation_norms.shape[0]:
-            if verbose:
-                print(f"警告: 层 {name} 维度不匹配，跳过 (权重: {weight.shape}, 激活: {activation_norms.shape})")
-            continue
-        
-        # 计算通道重要性
-        importance_scores = compute_channel_importance(weight, activation_norms)
-        channel_importances[layer] = importance_scores
-        
-        # 生成剪枝计划
-        pruning_indices = get_pruning_indices(importance_scores, pruning_ratio)
-        if pruning_indices:
-            pruning_plan[layer] = pruning_indices
-    
-    if not pruning_plan:
-        if verbose:
-            print("警告: 没有生成有效的剪枝计划")
-        return pipeline
-    
-    # 步骤4: 执行结构化剪枝
-    if verbose:
-        print("\n步骤4: 执行结构化剪枝...")
-        print_pruning_summary(pruning_plan, channel_importances)
     
     # 准备示例输入用于依赖图构建
-    if 'cifar' in str(type(model)).lower() or any('32' in str(s) for s in [model]):
+    if 'cifar' in str(type(model)).lower() or hasattr(model, 'conv_in') and model.conv_in.in_channels == 3:
         example_input_size = (1, 3, 32, 32)
     else:
         example_input_size = (1, 3, 256, 256)
@@ -218,38 +177,50 @@ def prune_wanda_diff(pipeline,
         'timestep': torch.tensor([1]).long().to(device)
     }
     
-    # 使用torch-pruning进行结构化剪枝
+    # 创建Wanda重要性评估器
+    from utils.wanda_utils import WandaImportance
+    wanda_importance = WandaImportance(
+        aggregated_activations=aggregated_activations,
+        p=2,
+        normalizer='mean'
+    )
+    
+    # 设置忽略的层（通常是最后的输出层）
+    ignored_layers = [model.conv_out] if hasattr(model, 'conv_out') else []
+    
     try:
-        # 构建依赖图
-        DG = tp.DependencyGraph().build_dependency(model, example_inputs=example_inputs)
+        # 使用torch-pruning的MetaPruner，自动处理GroupNorm约束
+        pruner = tp.pruner.MagnitudePruner(
+            model,
+            example_inputs,
+            importance=wanda_importance,  # 使用Wanda重要性而不是magnitude
+            iterative_steps=1,
+            ch_sparsity=pruning_ratio,
+            ignored_layers=ignored_layers,
+            # round_to=32,  # 可选：强制通道数为32的倍数
+        )
         
-        # 执行剪枝
-        pruning_groups = []
-        for layer, indices in pruning_plan.items():
-            if len(indices) == 0:
-                continue
-                
-            try:
-                # 获取剪枝组
-                group = DG.get_pruning_group(layer, tp.prune_conv_out_channels, idxs=indices)
-                
-                # 检查剪枝组的有效性
-                if DG.check_pruning_group(group):
-                    pruning_groups.append(group)
-                else:
-                    if verbose:
-                        print(f"警告: 层 {layer} 的剪枝组无效，跳过")
-                        
-            except Exception as e:
-                if verbose:
-                    print(f"警告: 处理层 {layer} 时出错: {e}")
-                continue
+        if verbose:
+            print(f"✅ 使用torch-pruning框架，自动检测GroupNorm约束")
+            print(f"✅ 剪枝比率: {pruning_ratio:.1%}")
+            print(f"✅ 忽略层数: {len(ignored_layers)}")
         
-        # 执行所有有效的剪枝组
-        for group in pruning_groups:
+        # 执行剪枝前的统计
+        base_macs, base_params = tp.utils.count_ops_and_params(model, example_inputs)
+        
+        if verbose:
+            print(f"\n步骤4: 执行结构化剪枝...")
+            print(f"原始参数: {base_params/1e6:.2f}M")
+            print(f"原始FLOPs: {base_macs/1e9:.2f}G")
+        
+        # 执行剪枝 - torch-pruning会自动处理GroupNorm约束
+        model.zero_grad()
+        model.eval()
+        
+        for group in pruner.step(interactive=True):
             group.prune()
-            
-        # 更新静态属性（处理某些模块的特殊需求）
+        
+        # 更新静态属性
         try:
             from diffusers.models.resnet import Upsample2D, Downsample2D
             for module in model.modules():
@@ -259,36 +230,68 @@ def prune_wanda_diff(pipeline,
                         if hasattr(module, 'out_channels'):
                             module.out_channels = module.conv.out_channels
         except ImportError:
-            # 如果导入失败，继续执行
             pass
         
-        # 计算剪枝效果
+        # 计算剪枝后的统计
         try:
-            base_macs, base_params = tp.utils.count_ops_and_params(model, example_inputs)
+            pruned_macs, pruned_params = tp.utils.count_ops_and_params(model, example_inputs)
             if verbose:
-                print(f"\n剪枝完成!")
-                print(f"参数减少: {base_params/1e6:.2f}M")
-                print(f"FLOPs: {base_macs/1e9:.2f}G")
-        except:
+                print(f"\n============================================================")
+                print(f"Wanda-Diff 剪枝摘要 (使用torch-pruning GroupNorm约束)")
+                print(f"============================================================")
+                print(f"参数: {base_params/1e6:.4f}M => {pruned_params/1e6:.4f}M")
+                print(f"FLOPs: {base_macs/1e9:.4f}G => {pruned_macs/1e9:.4f}G") 
+                param_reduction = (base_params - pruned_params) / base_params
+                flop_reduction = (base_macs - pruned_macs) / base_macs
+                print(f"参数减少: {param_reduction:.1%}")
+                print(f"FLOPs减少: {flop_reduction:.1%}")
+                print(f"============================================================")
+        except Exception as e:
             if verbose:
                 print("剪枝完成! (无法计算详细统计)")
-        
+                
     except Exception as e:
         if verbose:
-            print(f"剪枝过程中出错: {e}")
-            print("尝试使用备用方法...")
+            print(f"❌ torch-pruning剪枝失败: {e}")
+            print("回退到简单剪枝方法...")
         
-        # 备用方法：简单的通道置零（仅用于测试）
+        # 回退方案：使用原有的自定义剪枝逻辑，但添加GroupNorm约束
+        from utils.wanda_utils import get_pruning_indices_with_groupnorm_constraint
+        
+        conv_layers = [(name, module) for name, module in model.named_modules() 
+                      if isinstance(module, nn.Conv2d)]
+        
+        pruning_plan = {}
+        for name, layer in conv_layers:
+            if layer not in aggregated_activations:
+                continue
+                
+            weight = layer.weight.detach().cpu().float()
+            activation_norms = aggregated_activations[layer].float()
+            
+            if weight.shape[1] != activation_norms.shape[0]:
+                continue
+                
+            # 计算Wanda重要性
+            importance_scores = compute_channel_importance(weight, activation_norms)
+            
+            # 使用带GroupNorm约束的剪枝索引选择
+            pruning_indices = get_pruning_indices_with_groupnorm_constraint(
+                importance_scores, pruning_ratio, num_groups=32
+            )
+            if pruning_indices:
+                pruning_plan[layer] = pruning_indices
+        
+        # 执行简单的权重置零
         with torch.no_grad():
             for layer, indices in pruning_plan.items():
                 if hasattr(layer, 'weight') and layer.weight is not None:
-                    # 将对应通道的权重置零
                     layer.weight.data[indices] = 0
                     if hasattr(layer, 'bias') and layer.bias is not None:
                         layer.bias.data[indices] = 0
         
         if verbose:
-            print("使用备用方法完成剪枝")
+            print("✅ 使用回退方法完成剪枝（带GroupNorm约束）")
     
     # 清理
     hooker.clear()
