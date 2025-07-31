@@ -1,0 +1,154 @@
+# Diffusion MaskPro Training Configuration
+# Two-stage hybrid pruning: Structural + N:M sparsity learning
+
+# Model Configuration
+model:
+  # Path to magnitude-pruned model (Stage 1 output)
+  pruned_model_path: "run/pruned/magnitude/ddpm_cifar10_pruned"
+  
+  # Initial masks extracted from pruned model
+  initial_masks_dir: "run/maskpro/initial_masks"
+  
+  # N:M sparsity configuration
+  n: 2  # Number of non-zero weights per group
+  m: 4  # Group size (2:4 sparsity)
+  
+  # Layer targeting
+  target_layers:
+    - ".*conv.*"
+    - ".*linear.*" 
+    - ".*to_[qkv].*"
+    - ".*proj.*"
+  
+  exclude_layers:
+    - ".*norm.*"
+    - ".*embed.*"
+    - ".*pos_embed.*"
+    - ".*time_embed.*"
+    - ".*conv_out.*"
+
+# Training Configuration
+training:
+  # Basic training parameters
+  epochs: 50
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  
+  # Learning rates (dual optimizer setup)
+  model_lr: 1e-5      # Lower LR for model weights
+  mask_lr: 1e-3       # Higher LR for mask parameters
+  
+  # Policy gradient specific
+  baseline_momentum: 0.99  # EMA momentum for baseline
+  mask_loss_weight: 1.0    # Weight for mask loss
+  
+  # Diffusion specific
+  num_train_timesteps: 1000
+  timestep_sampling: "uniform"  # uniform, importance, early, late
+  timestep_subset: null  # Use all timesteps
+  
+  # Regularization
+  weight_decay: 1e-4
+  gradient_clip_norm: 1.0
+  
+  # Validation
+  val_freq: 5  # Validate every N epochs
+  save_freq: 10  # Save checkpoint every N epochs
+
+# Dataset Configuration
+dataset:
+  name: "cifar10"
+  size: 8192  # Number of samples for training
+  val_size: 1024  # Number of samples for validation
+  
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+
+# Hardware Configuration
+hardware:
+  device: "cuda:0"
+  mixed_precision: true
+  compile_model: false  # PyTorch 2.0 compile
+  
+  # Memory optimization
+  gradient_checkpointing: false
+  cpu_offload: false
+
+# Logging Configuration
+logging:
+  # SwanLab configuration
+  use_swanlab: true
+  project_name: "diffusion-maskpro"
+  experiment_name: "ddpm-cifar10-magnitude-2-4"
+  
+  # Logging frequency
+  log_freq: 10      # Log every N steps
+  image_log_freq: 100  # Log sample images every N steps
+  
+  # What to log
+  log_metrics:
+    - "main_loss"
+    - "mask_loss" 
+    - "total_loss"
+    - "model_lr"
+    - "mask_lr"
+    - "sparsity_ratio"
+    - "nm_compliance"
+    - "gradient_norm"
+    
+  log_images:
+    - "generated_samples"
+    - "mask_visualizations"
+
+# Output Configuration  
+output:
+  # Base output directory
+  output_dir: "run/maskpro/training"
+  
+  # Subdirectories
+  checkpoints_dir: "checkpoints"
+  logs_dir: "logs"
+  samples_dir: "samples"
+  analysis_dir: "analysis"
+  
+  # Checkpoint saving
+  save_best_only: false
+  save_last_n: 3  # Keep last N checkpoints
+
+# Validation Configuration
+validation:
+  # Validation metrics
+  metrics:
+    - "fid_score"
+    - "sample_quality"
+    - "mask_entropy"
+    - "sparsity_compliance"
+  
+  # Sample generation for validation
+  num_samples: 64
+  num_inference_steps: 100
+  guidance_scale: 1.0
+
+# Advanced Configuration
+advanced:
+  # Mask initialization strategy
+  mask_init_strategy: "magnitude_based"  # magnitude_based, random, learned
+  
+  # Temperature scheduling for Gumbel Softmax
+  temperature_scheduling:
+    initial: 1.0
+    final: 0.1
+    decay_type: "exponential"  # linear, exponential, cosine
+  
+  # Early stopping
+  early_stopping:
+    patience: 10
+    metric: "val_loss"
+    min_delta: 1e-4
+  
+  # Mask learning strategy
+  mask_learning:
+    warmup_epochs: 5  # Epochs before mask learning starts
+    freeze_model_epochs: 0  # Epochs to freeze model weights initially 
